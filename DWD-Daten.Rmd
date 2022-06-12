@@ -1,0 +1,13 @@
+---
+title: "Projekt"
+author: "Safouan"
+date: '2022-06-12'
+output: html_document
+---
+
+```{r}
+
+# Funktionen, die verwendet wird
+# Funktion, um DWD-Daten sowie die entsprechenden Geografiedaten herunterzuladen
+
+```
