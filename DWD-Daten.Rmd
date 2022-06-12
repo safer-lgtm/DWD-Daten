@@ -6,6 +6,16 @@ output: html_document
 ---
 
 ```{r}
+# Libraries importieren
+library(lubridate)
+library(sf)
+library(tidyr)
+library(dplyr)
+library(DBI)
+library(RPostgres)
+library(ggplot2)
+library(viridis)
+
 
 # Funktionen, die verwendet wird
 # Funktion, um DWD-Daten sowie die entsprechenden Geografiedaten herunterzuladen
