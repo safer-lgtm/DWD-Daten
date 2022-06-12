@@ -7,67 +7,75 @@ output: html_document
 
 ```{r}
 # Libraries importieren
+library(rdwd)
 library(lubridate)
+library(foreach)
 library(sf)
 library(tidyr)
 library(dplyr)
 library(DBI)
 library(RPostgres)
 library(ggplot2)
+library(viridisLite)
 library(viridis)
 
-# Funktionen, die verwendet wird
-# Funktion, um DWD-Daten sowie die entsprechenden Geografiedaten herunterzuladen
-
-selectData <- function(variable, probezeit, speicherpfad){
-    # URL der täglichen DWD-Daten  
-    dataset <- "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/daily"
-    daily_data <- foreach(i=1:length(variable)) %do% {
-        variable_url <- as.character(paste(dataset, variable[i], sep="/"))
-        probezeit_url <- as.character(paste(variable_url, probezeit, sep="/"))
-        url <- probezeit_url
-        # Die URLS der herunterzuladenden Daten abrufen
-        html <- paste(readLines(url), collapse="\n")
-        matched <- str_match_all(html, "<a href=\"(.*?)\"")
-        file_names <- matched[[1]][,2]
-        dataFrame <- as.data.frame(list(name=file_names))  
-        # Zip-Dateien sowie Txt-Dateien auswählen
-        df1 <- dataFrame %>% filter(grepl("zip", name))
-        df2 <- dataFrame %>% filter(grepl("txt", name))
-        txt_name = df2[1,]
-        setwd(speicherpfad)
-        if (!file.exists(variable[i])){
-            dir.create(variable[i])
-        }
-        variable_folder = as.character(paste(speicherpfad, variable[i], sep="/"))
-        setwd(variable_folder)
-        combined <- as.character(paste(url, txt_name, sep="/"))
-        download.file(combined, txt_name)
-        read_data <- foreach(j=1:length(df1[,]), .combine=rbind) %do% {      
-            file_name <- df1[j,]
-            if (!file.exists(file_name)){
-                dir.create(file_name)
-            } 
-            dir = as.character(paste(variable_folder, file_name, sep="/"))
-            combined_file <- as.character(paste(dir, file_name, sep="/"))
-            combined_url <- as.character(paste(url, file_name, sep="/"))
-            # Daten herunterladen
-            download.file(combined_url, destfile = combined_file)
-            # Dekomprimierte Zip-Dateien
-            unzip(combined_file, exdir = dir)
-            # Die Produkt-Datei auswählen, die die Informationen über die Wetterdaten enthält.
-            selected <- list.files(path=dir, pattern="produkt")
-            produkt <- as.character(paste(dir, selected, sep="/"))
-            # Produkt-Datei lesen
-            read.delim(produkt, header = TRUE, sep = ";")
-        }
-        result_name <- as.character(paste(variable[i], "csv", sep = "."))
-        # Doppelte Datensätzen löschen
-        unique_data <- read_data %>% distinct(.keep_all = TRUE)
-        
-        # Speicherung der Daten in meiner Pfad
-        write.csv(unique_data,  as.character(paste(variable_folder, result_name, sep="/")))
-    }
+# Funktion, um DWD-Daten herunterzuladen
+herunterladen <- function(auflösung, variable, probezeit){
+    links <- selectDWD(res=auflösung, var=variable, per=probezeit)
+    data <- foreach(i=1:length(links), .combine=rbind) %do% {
+        file <- dataDWD(links[i], read=FALSE, dir='DWDdata')
+        clim <- readDWD(file, varnames=TRUE)
+    }    
+    return(data)
 }
+
+# Überschreiben der %+%-Operator, um eine bessere Syntax für die String-Verkettung zu erhalten
+'%+%' <- function(x,y) paste(x, y, sep = "")
+
+# Funktion, um DWD-Daten in TimeScale Datenbank zu speichern
+saveToTimeScaleDB <- function(connection, data, tbl_name, partitioned_on='MESS_DATUM') {
+    # Erstellen einer reguläre PostgreSQL-Tabelle
+    dbWriteTable(con, tbl_name, data, overwrite=T)
+    
+    # Konvertieren Sie die reguläre Tabelle in eine Hypertabelle, die nach der Spalte MESS_DATUM partitioniert ist und deren Intervall (chunck interval) 1 Monat beträgt
+    query <- "SELECT create_hypertable(" %+% "'" %+% tbl_name %+% "'" %+% ',' %+% "'" %+% partitioned_on %+% "'" %+% ',' %+% "migrate_data => true" %+% ',' %+% "chunk_time_interval => INTERVAL '1 month')"
+    rs <- dbSendQuery(con, query)
+    dbClearResult(rs)
+}
+
+# Funktion, um die historische Daten einmalig sowie die neueste Daten 
+durchführen <- function(recent_data, tbl_recent='recent_temperature', historical_data, tbl_historical='temperatur'){
+    # Die Speicheung der neuesten Daten in TimeScaleDB  
+    saveToTimeScaleDB(con, recent_data, tbl_recent)
+    
+    # Speicheung der historischen Daten in TimeScaleDB
+    saveToTimeScaleDB(con, historical_data, tbl_historical)
+    
+    # Merge data
+    query <- "INSERT INTO " %+%  tbl_historical  %+% " SELECT * FROM "  %+% tbl_recent
+    rs <- dbSendQuery(con, query)
+    dbClearResult(rs)
+}
+
+# Verbindung zu einer bestimmten Postgres-Datenbank
+con <- dbConnect(Postgres(), dbname = 'postgres', 
+                 host = 'localhost',
+                 port = 5432,
+                 user = 'postgres',
+                 password = 'PostgreSQL@22')
+
+
+recent_weather <- herunterladen("daily", "weather_phenomena", "recent")
+historical_weather <- herunterladen("daily", "weather_phenomena", "hist")
+data(geoIndex)
+
+# Die Speicheung der Geografiedaten in TimeScaleDB  
+dbWriteTable(con, "geometry", geoIndex, overwrite=T)
+
+# Datenspeicherung in TimeScaleDB
+durchführen(recent_weather, 'recent_weather', historical_weather, 'weather')
+
+
+
 
 ```
