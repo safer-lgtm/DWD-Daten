@@ -19,4 +19,55 @@ library(viridis)
 # Funktionen, die verwendet wird
 # Funktion, um DWD-Daten sowie die entsprechenden Geografiedaten herunterzuladen
 
+selectData <- function(variable, probezeit, speicherpfad){
+    # URL der täglichen DWD-Daten  
+    dataset <- "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/daily"
+    daily_data <- foreach(i=1:length(variable)) %do% {
+        variable_url <- as.character(paste(dataset, variable[i], sep="/"))
+        probezeit_url <- as.character(paste(variable_url, probezeit, sep="/"))
+        url <- probezeit_url
+        # Die URLS der herunterzuladenden Daten abrufen
+        html <- paste(readLines(url), collapse="\n")
+        matched <- str_match_all(html, "<a href=\"(.*?)\"")
+        file_names <- matched[[1]][,2]
+        dataFrame <- as.data.frame(list(name=file_names))  
+        # Zip-Dateien sowie Txt-Dateien auswählen
+        df1 <- dataFrame %>% filter(grepl("zip", name))
+        df2 <- dataFrame %>% filter(grepl("txt", name))
+        txt_name = df2[1,]
+        setwd(speicherpfad)
+        if (!file.exists(variable[i])){
+            dir.create(variable[i])
+        }
+        variable_folder = as.character(paste(speicherpfad, variable[i], sep="/"))
+        setwd(variable_folder)
+        combined <- as.character(paste(url, txt_name, sep="/"))
+        download.file(combined, txt_name)
+        read_data <- foreach(j=1:length(df1[,]), .combine=rbind) %do% {      
+            file_name <- df1[j,]
+            if (!file.exists(file_name)){
+                dir.create(file_name)
+            } 
+            dir = as.character(paste(variable_folder, file_name, sep="/"))
+            combined_file <- as.character(paste(dir, file_name, sep="/"))
+            combined_url <- as.character(paste(url, file_name, sep="/"))
+            # Daten herunterladen
+            download.file(combined_url, destfile = combined_file)
+            # Dekomprimierte Zip-Dateien
+            unzip(combined_file, exdir = dir)
+            # Die Produkt-Datei auswählen, die die Informationen über die Wetterdaten enthält.
+            selected <- list.files(path=dir, pattern="produkt")
+            produkt <- as.character(paste(dir, selected, sep="/"))
+            # Produkt-Datei lesen
+            read.delim(produkt, header = TRUE, sep = ";")
+        }
+        result_name <- as.character(paste(variable[i], "csv", sep = "."))
+        # Doppelte Datensätzen löschen
+        unique_data <- read_data %>% distinct(.keep_all = TRUE)
+        
+        # Speicherung der Daten in meiner Pfad
+        write.csv(unique_data,  as.character(paste(variable_folder, result_name, sep="/")))
+    }
+}
+
 ```
