@@ -66,16 +66,35 @@ con <- dbConnect(Postgres(), dbname = 'postgres',
 
 
 recent_weather <- herunterladen("daily", "weather_phenomena", "recent")
-historical_weather <- herunterladen("daily", "weather_phenomena", "hist")
+historical_weather <- herunterladen("daily", "weather_phenomena", "recent")
 data(geoIndex)
-
 # Die Speicheung der Geografiedaten in TimeScaleDB  
 dbWriteTable(con, "geometry", geoIndex, overwrite=T)
 
 # Datenspeicherung in TimeScaleDB
 durchführen(recent_weather, 'recent_weather', historical_weather, 'weather')
+#query <- read_file("script.sql")
+param = 'GEWITTER.Gewitter'
+average <- dbGetQuery(con, 
+    'SELECT g."state" "Bundesland", 
+    avg(w.' %+% '"' %+% param %+% '"' %+% ') "durchschnitt_weather" 
+    FROM weather w
+    INNER JOIN geometry g  ON w."STATIONS_ID" = g."id" 
+    GROUP BY "state"')
 
+# Postgres-Verbindung schließen
+dbDisconnect(con)
 
+# Laden der Shapefile von Deutschland per Bundesland
+germany_shp <- read_sf('DEU_adm/DEU_adm1.shp')
 
+# Fortify and Join with Temperatures:
+germany_shp.df <- merge(fortify(germany_shp), as.data.frame(temp), by.x="NAME_1", by.y="Bundesland")
+
+germany_shp.df$avg_weather
+
+ggplot(germany_shp.df) +
+    geom_sf(aes(fill=avg_weather)) +
+    scale_fill_viridis()
 
 ```
