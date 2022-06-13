@@ -89,6 +89,16 @@ average <- function(connection, tbl_name, parameter, von_datum, bis_datum){
     return(query)
 }
 
+average_state <- function(connection, tbl_name, parameter){
+    query <- dbGetQuery(con, 
+    'SELECT g."state" "Bundesland", 
+    avg(w.' %+% '"' %+% parameter %+% '"' %+% ') "Durchschnitt" 
+    FROM ' %+% tbl_name %+% ' w
+    INNER JOIN geometry g  ON w."STATIONS_ID" = g."id" ' %+% 
+    ' GROUP BY "state"')
+    return(query)
+}
+
 # Verbindung zu einer bestimmten Postgres-Datenbank
 con <- dbConnect(Postgres(), dbname = 'postgres', 
                  host = 'localhost',
@@ -107,7 +117,8 @@ dbWriteTable(con, "geometry", geo, overwrite=T)
 durchführen(recent, 'recent', historical, 'temperatur')
 
 # Durchschnitt für einen gegebenen Parameter und Zeitraum berechnen
-durchschnitt <- average(con, 'temperatur', 'V_TE005M.Erdbodentemperatur_005cm', '2021-01-01', '2021-02-01')
+durchschnitt <- average(con, 'temperatur', 'V_TE005M.Erdbodentemperatur_005cm', '1951-01-01', '1951-02-01')
+test <- average_state(con, 'temperatur', 'V_TE005M.Erdbodentemperatur_005cm')
 
 # Postgres-Verbindung schließen
 dbDisconnect(con)
@@ -123,15 +134,16 @@ germany_shp.df <- merge(fortify(germany_shp), as.data.frame(durchschnitt), by.x=
 
 # Daten aggregieren, um den mittleren Breitengrad und den mittleren Längengrad für jeden Bundesland zu ermitteln
 cnames <- aggregate(cbind(lon, lat) ~ state, data=geo, FUN=function(x) mean(range(x)))
-#distcenters <- ddply(geoIndex, .(state), summarize, clat = mean(lat), clon = mean(lon))
 
 df <- subset(cnames, (state %in% germany_shp.df$NAME_1))
 
 # Visualisierung
-ggplot(germany_shp.df) +
-    geom_sf(aes(fill=Durchschnitt)) +
+p <- ggplot() + 
+  geom_sf(data=germany_shp, color="black")
+
+p + geom_sf(data = germany_shp.df, aes(fill=Durchschnitt)) +
     scale_fill_viridis() +
     geom_text(data=df, aes(lon, lat, label=state), size=2) +
-    ggtitle('Durchschnitt im Monat 2021-01') 
-
+    ggtitle('Durchschnitt im Monat 1951-01') 
+ 
 ```
