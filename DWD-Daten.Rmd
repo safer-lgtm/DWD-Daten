@@ -7,17 +7,14 @@ output: html_document
 
 ```{r}
 # Libraries importieren
-library(rdwd)
-library(lubridate)
+library(rdwd) # um DWD-Daten zu importienren
 library(foreach)
-library(sf)
-library(tidyr)
-library(dplyr)
-library(DBI)
-library(RPostgres)
-library(ggplot2)
+library(sf) # um Shapefile von Deutschland zu importieren
+library(DBI) # um Datenbank in R zu bearbeiten
+library(RPostgres) # um Postgresql bzw. TimeScaleDB zu verbinden
+library(ggplot2) # um Visualisierung der Daten zu ermöglichen
 library(viridisLite)
-library(viridis)
+library(viridis) # für Farbenblinde besser lesbar ist und sich gut in Graustufen drucken lässt
 
 # Funktion, um DWD-Daten herunterzuladen
 herunterladen <- function(auflösung, variable, probezeit){
@@ -44,7 +41,7 @@ saveToTimeScaleDB <- function(connection, data, tbl_name, partitioned_on='MESS_D
 }
 
 # Funktion, um die historische Daten einmalig sowie die neueste Daten 
-durchführen <- function(recent_data, tbl_recent='recent_temperature', historical_data, tbl_historical='temperatur'){
+durchführen <- function(recent_data, tbl_recent, historical_data, tbl_historical){
     # Die Speicheung der neuesten Daten in TimeScaleDB  
     saveToTimeScaleDB(con, recent_data, tbl_recent)
     
@@ -64,37 +61,65 @@ con <- dbConnect(Postgres(), dbname = 'postgres',
                  user = 'postgres',
                  password = 'PostgreSQL@22')
 
-
 recent_weather <- herunterladen("daily", "weather_phenomena", "recent")
 historical_weather <- herunterladen("daily", "weather_phenomena", "recent")
-data(geoIndex)
+
+# Geografische der DWD-Daten anrufen
+geometry <- function(){
+    data(geoIndex)
+    geo <- geoIndex
+    # Löschen des Tirol-Bundeslands der Republik Österreich
+    geo <- subset(geo, state != "Tirol") 
+    return(geo)
+}
+
+geo <- geometry()
+
 # Die Speicheung der Geografiedaten in TimeScaleDB  
-dbWriteTable(con, "geometry", geoIndex, overwrite=T)
+dbWriteTable(con, "geometry", geo, overwrite=T)
 
 # Datenspeicherung in TimeScaleDB
 durchführen(recent_weather, 'recent_weather', historical_weather, 'weather')
-#query <- read_file("script.sql")
-param = 'GEWITTER.Gewitter'
-average <- dbGetQuery(con, 
+
+average <- function(connection, tbl_name, parameter, von_datum, bis_datum){
+    query <- dbGetQuery(con, 
     'SELECT g."state" "Bundesland", 
-    avg(w.' %+% '"' %+% param %+% '"' %+% ') "durchschnitt_weather" 
-    FROM weather w
+    avg(w.' %+% '"' %+% parameter %+% '"' %+% ') "Durchschnitt" 
+    FROM ' %+% tbl_name %+% ' w
     INNER JOIN geometry g  ON w."STATIONS_ID" = g."id" 
-    GROUP BY "state"')
+    WHERE w."MESS_DATUM" >= ' %+% "'" %+% von_datum %+% "'" %+%
+    ' AND w."MESS_DATUM" < ' %+% "'" %+% bis_datum %+% "'" %+%
+    ' GROUP BY "state"')
+    return(query)
+}
+
+# Durchschnitt für einen gegebenen Parameter und Zeitraum berechnen
+durchschnitt <- average(con, 'temperatur', 'V_TE005M', '1951-01-01', '1951-02-01')
 
 # Postgres-Verbindung schließen
 dbDisconnect(con)
 
 # Laden der Shapefile von Deutschland per Bundesland
-germany_shp <- read_sf('DEU_adm/DEU_adm1.shp')
+germany_shp <- st_read('DEU_adm/DEU_adm1.shp')
 
-# Fortify and Join with Temperatures:
-germany_shp.df <- merge(fortify(germany_shp), as.data.frame(temp), by.x="NAME_1", by.y="Bundesland")
+# Spaltennamen verändern
+germany_shp$NAME_1 <- unique(geo$state) 
 
-germany_shp.df$avg_weather
+# Fortify and Verbinden der Shapefile und die Durchschnitte per Bundesland
+germany_shp.df <- merge(fortify(germany_shp), as.data.frame(durchschnitt), by.x="NAME_1", by.y="Bundesland")
 
+# Daten aggregieren, um den mittleren Breitengrad und den mittleren Längengrad für jeden Bundesland zu ermitteln
+cnames <- aggregate(cbind(lon, lat) ~ state, data=geo, FUN=function(x) mean(range(x)))
+
+df <- subset(cnames, (state %in% germany_shp.df$NAME_1))
+
+#distcenters <- ddply(geoIndex, .(state), summarize, clat = mean(lat), clon = mean(lon))
+
+# Visualisierung
 ggplot(germany_shp.df) +
-    geom_sf(aes(fill=avg_weather)) +
-    scale_fill_viridis()
+    geom_sf(aes(fill=Durchschnitt)) +
+    scale_fill_viridis() +
+    geom_text(data=df, aes(lon, lat, label = state), size=2) +
+    ggtitle('Durchschnitt im Monat 2021-01') 
 
 ```
