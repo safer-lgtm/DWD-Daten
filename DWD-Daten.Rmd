@@ -98,11 +98,11 @@ con <- dbConnect(Postgres(), dbname = 'postgres',
 
 # Bodenerdtemperatur und Niederschlag
 # variablen = c("soil_temperature", "more_precip")
-
-# historische und neueste DWD-Daten aufbereiten
-recent <- herunterladen("daily", "soil_temperature", "recent")
-historical <- herunterladen("daily", "soil_temperature", "hist")
-
+if(!file.exists("DWDDaten")){
+    # historische und neueste DWD-Daten aufbereiten
+    recent <- herunterladen("daily", "soil_temperature", "recent")
+    historical <- herunterladen("daily", "soil_temperature", "hist")
+}
 # sowie die geografischedaten
 geo <- geometry()
 
