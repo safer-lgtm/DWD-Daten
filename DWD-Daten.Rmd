@@ -27,6 +27,7 @@ herunterladen <- function(auflösung, variable, probezeit){
     return(data)
 }
 
+
 # Geografische der DWD-Daten anrufen
 geometry <- function(){
     data(geoIndex)
