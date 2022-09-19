@@ -1,0 +1,175 @@
+---
+title: "Projekt"
+author: "Safouan"
+date: '2022-06-12'
+output: html_document
+---
+
+```{r}
+# Libraries importieren
+library(rdwd) # um DWD-Daten zu importienren
+library(foreach)
+library(tidyverse)
+library(sf) # um Shapefile von Deutschland zu importieren
+library(DBI) # um Datenbank in R zu bearbeiten
+library(RPostgres) # um Postgresql bzw. TimeScaleDB zu verbinden
+library(ggplot2) # um Visualisierung der Daten zu ermöglichen
+library(viridisLite)
+library(viridis) # für Farbenblinde besser lesbar ist und sich gut in Graustufen drucken lässt
+library(dplyr)
+# Funktion, um DWD-Daten herunterzuladen
+herunterladen <- function(auflösung, variable, probezeit){
+    tryCatch(
+        {
+        links <- selectDWD(res=auflösung, var=variable, per=probezeit)
+        data <- foreach(i=1:length(links), .combine=rbind) %do% {
+            file <- dataDWD(links[i], read=FALSE, dir='DWDdata')
+            clim <- readDWD(file, varnames=TRUE)
+        }    
+        return(data)
+        },
+        error=function(e) {
+            message('An Error Occurred')
+            print(e)
+        },
+        #if a warning occurs, tell me the warning
+        warning=function(w) {
+            message('A Warning Occurred')
+            print(w)
+            return(NA)
+        }
+    )
+}
+
+# Geografische der DWD-Daten anrufen
+geometry <- function(){
+    data(geoIndex)
+    geo <- geoIndex
+    # Löschen des Tirol-Bundeslands der Republik Österreich
+    geo <- subset(geo, state != "Tirol") 
+    return(geo)
+}
+
+# Überschreiben der %+%-Operator, um eine bessere Syntax für die String-Verkettung zu erhalten
+'%+%' <- function(x,y) paste(x, y, sep = "")
+
+# Funktion, um DWD-Daten in TimeScale Datenbank zu speichern
+saveToTimeScaleDB <- function(connection, data, tbl_name, partitioned_on='MESS_DATUM') {
+    # Erstellen einer reguläre PostgreSQL-Tabelle
+    dbWriteTable(con, tbl_name, data, overwrite=T)
+    
+    # Konvertieren Sie die reguläre Tabelle in eine Hypertabelle, die nach der Spalte MESS_DATUM partitioniert ist und deren Intervall (chunck interval) 1 Monat beträgt
+    query <- "SELECT create_hypertable(" %+% "'" %+% tbl_name %+% "'" %+% ',' %+% "'" %+% partitioned_on %+% "'" %+% ',' %+% "migrate_data => true" %+% ',' %+% "chunk_time_interval => INTERVAL '1 month')"
+    rs <- dbSendQuery(con, query)
+    dbClearResult(rs)
+}
+
+# Funktion, um die historische Daten einmalig sowie die neueste Daten 
+durchführen <- function(recent_data, tbl_recent, historical_data, tbl_historical){
+    #if(tbl_historical == "temperatur"){
+        # Löschen V_TE002M Spalte, da dies keinen wert enthält  
+    #    recent_data[, "V_TE002M.Erdbodentemperatur_002cm"] <- NULL
+    #    historical_data[, "V_TE002M.Erdbodentemperatur_002cm"] <- NULL
+    #}
+    # Löschen der Misswerte bzw. 'NA' Werte
+    recent_data <- recent_data %>% drop_na()
+    historical_data <- historical_data %>% drop_na()
+    
+    # Doppelte Zeilen löschen
+    recent_data <- recent_data %>% distinct(.keep_all = TRUE)
+    historical_data <- historical_data %>% distinct(.keep_all = TRUE)
+    
+    # Die Speicheung der neuesten Daten in TimeScaleDB  
+    saveToTimeScaleDB(con, recent_data, tbl_recent)
+    
+    # Speicheung der historischen Daten in TimeScaleDB
+    saveToTimeScaleDB(con, historical_data, tbl_historical)
+    
+    # Merge data
+    query <- "INSERT INTO " %+%  tbl_historical  %+% " SELECT * FROM "  %+% tbl_recent
+    rs <- dbSendQuery(con, query)
+    dbClearResult(rs)
+}
+
+average <- function(connection, tbl_name, parameter, von_datum, bis_datum){
+    query <- dbGetQuery(con, 
+    'SELECT g."landkreis", 
+    sum(w.' %+% '"' %+% parameter %+% '"' %+% ') "Summe" 
+    FROM ' %+% tbl_name %+% ' w
+    INNER JOIN geometry g  ON w."STATIONS_ID" = g."id" 
+    WHERE w."MESS_DATUM" >= ' %+% "'" %+% von_datum %+% "'" %+%
+    ' AND w."MESS_DATUM" < ' %+% "'" %+% bis_datum %+% "'" %+%
+    ' GROUP BY "landkreis"')
+    return(query)
+}
+
+# Verbindung zu einer bestimmten Postgres-Datenbank
+con <- dbConnect(Postgres(), dbname = 'postgres', 
+                 host = 'localhost',
+                 port = 5432,
+                 user = 'postgres',
+                 password = 'PostgreSQL@22')
+
+# Bodenerdtemperatur und Niederschlag
+# variablen = c("soil_temperature", "more_precip")
+
+# historische und neueste DWD-Daten aufbereiten
+rec <- herunterladen("daily", "kl", "recent")
+hist <- herunterladen("daily", "kl", "hist")
+# sowie die geografischedaten
+geo <- geometry()
+
+# Einlesen der Shapefile von Deutschland per Kreise
+krs <- st_read("gadm36_DEU_shp/gadm36_DEU_2.shp", quiet=TRUE)
+# Umwandlung in ein räumliches Objekt
+msf <- sf::st_as_sf(geo, coords=c("lon", "lat"), crs=st_crs(krs))
+# Liste mit msf rownumbers für jeden Kreis
+msf <- msf %>% mutate(
+  intersect = as.integer(st_intersects(geometry, krs))
+  , landkreis = if_else(is.na(intersect), '', krs$NAME_2[intersect])
+)
+
+station_per_kreis <- data.frame(msf)[, c("id", "name", "landkreis")]
+geo <- mutate(geo, landkreis = station_per_kreis$landkreis) 
+geo <- geo[!(geo$landkreis==""), ]
+
+df.merge <- merge(krs, geo, by.x="NAME_2", by.y="landkreis")
+
+# Spaltennamen verändern bzw. sortieren
+unique_lk <- unique(df.merge$NAME_2)
+unique_lk <- sort(unique(geo$landkreis))
+
+# Die Speicheung der Geografiedaten in TimeScaleDB  
+dbWriteTable(con, "geometry", geo, overwrite=T)
+
+# Datenspeicherung in TimeScaleDB
+durchführen(rec, 'recent_klima', hist, 'klimat')
+
+# Durchschnitt für einen gegebenen Parameter und Zeitraum berechnen
+durchschnitt <- average(con, 'niederschlag', 'RS.Niederschlagshoehe', '2022-08-01', '2022-09-01')
+#durchschnitt <- average(con, 'temperatur', 'V_TE010M.Erdbodentemperatur_010cm', '2022-08-01', '2022-09-01')
+
+# Verbinden der Shapefile und die Durchschnitte per Kreis
+germany_shp.df <- merge(df.merge, durchschnitt, by.x="NAME_2", by.y="landkreis")
+
+cnames <- aggregate(cbind(lon, lat) ~ landkreis, data=geo, FUN=function(x) mean(range(x)))
+
+max <- durchschnitt[which.max(durchschnitt$Summe),]
+
+df <- subset(cnames, (landkreis %in% max$landkreis))
+p <- ggplot() + 
+        geom_sf(data=df.merge, fill="gray")
+p + geom_sf(data=germany_shp.df, aes(fill=Summe)) +
+        geom_text(data=df, aes(lon, lat, label=landkreis), size=3.5) +
+        scale_color_gradient(low = "blue", high = "red") +
+        ggtitle('Mittlerer Niederschlag des Monats August') 
+p <- ggplot() + 
+        geom_sf(data=df.merge, fill="gray")
+p + geom_sf(data=germany_shp.df, aes(fill=Durchschnitt)) +
+        geom_text(data=df, aes(lon, lat, label=landkreis), size=3.5) +
+        scale_fill_viridis() +
+        ggtitle('Mittlere Bodentemperatur des Monats August') 
+
+ggsave(filename = "MeanPrecip2.png", plot = p2)
+
+```
